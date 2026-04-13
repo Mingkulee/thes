@@ -122,3 +122,12 @@ async def run_orchestrator(user_message: str) -> str:
 
     logger.info("delegating to %s_agent", agent)
     return await _gemini(system_prompt, payload)
+
+
+async def run_specialist(agent_name: str, user_message: str) -> str:
+    """Run a single specialist sub-agent directly, bypassing the orchestrator."""
+    system_prompt = SUBAGENTS.get(agent_name)
+    if not system_prompt:
+        return f"[error: unknown agent '{agent_name}']"
+    logger.info("specialist %s_agent invoked directly", agent_name)
+    return await _gemini(system_prompt, user_message)
