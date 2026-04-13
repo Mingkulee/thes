@@ -78,9 +78,9 @@ def main() -> None:
         raise RuntimeError(
             "TELEGRAM_BOT_TOKEN is not set. Copy .env.example to .env and fill it in."
         )
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    if not os.environ.get("GOOGLE_API_KEY"):
         raise RuntimeError(
-            "ANTHROPIC_API_KEY is not set. Copy .env.example to .env and fill it in."
+            "GOOGLE_API_KEY is not set. Copy .env.example to .env and fill it in."
         )
 
     application = Application.builder().token(token).build()
