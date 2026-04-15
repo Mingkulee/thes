@@ -89,6 +89,19 @@ BOT_ROLES: list[dict[str, str | None]] = [
         ),
         "help": "리서치 전용 봇. 사실 기반 질문에 정확히 답변합니다.",
     },
+    {
+        "env": "TELEGRAM_BOT_TOKEN_WEATHER",
+        "agent": "weather",
+        "label": "weather",
+        "start": (
+            "안녕하세요 {user}님! 날씨 전문 봇입니다.\n"
+            "예) '서울 날씨 알려줘', '제주도 내일 비 와?'"
+        ),
+        "help": (
+            "날씨 전용 봇. 지역명을 포함해 질문하시면 Open-Meteo API를 통해 "
+            "현재 날씨와 3일 예보를 알려드립니다."
+        ),
+    },
 ]
 
 
