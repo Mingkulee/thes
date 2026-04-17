@@ -1,6 +1,10 @@
 # Environment variables
 .env
 
+# Gmail OAuth credentials (절대 커밋 금지)
+gmail_credentials.json
+gmail_token.json
+
 # Python
 __pycache__/
 *.py[cod]

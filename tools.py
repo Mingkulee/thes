@@ -308,3 +308,73 @@ def _extract_docx(docx_bytes: bytes) -> dict[str, Any]:
         "tables": tables,
         "image_count": image_count,
     }
+
+
+# ---------------------------------------------------------------------------
+# Gmail API tools
+# ---------------------------------------------------------------------------
+
+import asyncio as _asyncio
+import base64
+
+
+def _extract_email_body(payload: dict) -> str:
+    """Gmail API payload에서 텍스트 본문을 재귀적으로 추출합니다."""
+    mime = payload.get("mimeType", "")
+    body_data = payload.get("body", {}).get("data", "")
+
+    if body_data:
+        text = base64.urlsafe_b64decode(body_data).decode("utf-8", errors="replace")
+        if mime == "text/html":
+            text = re.sub(r"<[^>]+>", " ", text)
+            text = re.sub(r"\s{2,}", " ", text).strip()
+        return text
+
+    for part in payload.get("parts", []):
+        if part.get("mimeType") == "text/plain":
+            data = part.get("body", {}).get("data", "")
+            if data:
+                return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+
+    for part in payload.get("parts", []):
+        result = _extract_email_body(part)
+        if result:
+            return result
+
+    return payload.get("snippet", "")
+
+
+def _fetch_gmail_sync(max_results: int, query: str) -> list[dict[str, Any]]:
+    from gmail_auth import get_gmail_credentials
+    from googleapiclient.discovery import build  # type: ignore
+
+    creds = get_gmail_credentials()
+    service = build("gmail", "v1", credentials=creds)
+
+    result = service.users().messages().list(
+        userId="me", q=query, maxResults=max_results
+    ).execute()
+
+    messages = []
+    for ref in result.get("messages", []):
+        msg = service.users().messages().get(
+            userId="me", id=ref["id"], format="full"
+        ).execute()
+        headers = {h["name"]: h["value"] for h in msg["payload"].get("headers", [])}
+        body = _extract_email_body(msg["payload"])
+        messages.append({
+            "id": msg["id"],
+            "from": headers.get("From", ""),
+            "subject": headers.get("Subject", "(제목 없음)"),
+            "date": headers.get("Date", ""),
+            "snippet": msg.get("snippet", ""),
+            "body": body[:3000],
+        })
+    return messages
+
+
+async def fetch_gmail_messages(
+    max_results: int = 5, query: str = "is:unread"
+) -> list[dict[str, Any]]:
+    """Gmail에서 메일 목록을 가져옵니다 (비동기 래퍼)."""
+    return await _asyncio.to_thread(_fetch_gmail_sync, max_results, query)

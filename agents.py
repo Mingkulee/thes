@@ -15,7 +15,7 @@ import re
 from google import genai
 from google.genai import types
 
-from tools import describe_weather_code, fetch_weather, geocode_location
+from tools import describe_weather_code, fetch_gmail_messages, fetch_weather, geocode_location
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +61,12 @@ Analyze the user's message and respond ONLY with valid JSON — no markdown, no 
 {"agent": "<agent>", "payload": "<text>"}
 
 Rules:
-- "agent" must be one of: "translator", "coder", "researcher", "weather", "general"
+- "agent" must be one of: "translator", "coder", "researcher", "weather", "gmail", "general"
 - "translator"  → user wants text translated between languages
 - "coder"       → programming, code, debugging, software questions
 - "researcher"  → factual questions, concept explanations, summaries
 - "weather"     → user is asking about current or forecast weather for a location
+- "gmail"       → user wants to check, read, or summarize emails
 - "general"     → greetings, small talk, anything that doesn't fit above
 - "payload"     → for "general":  your direct friendly reply to the user
                   for "weather":  the user's original weather question (keep it intact)
@@ -208,6 +209,18 @@ async def run_orchestrator(user_message: str) -> str:
         logger.info("delegating to weather_agent")
         return await run_weather(payload)
 
+    if agent == "gmail":
+        logger.info("delegating to gmail_agent")
+        try:
+            msgs = await fetch_gmail_messages(max_results=5, query="is:unread")
+            return await run_gmail_analyst(msgs, payload)
+        except FileNotFoundError:
+            return (
+                "⚠️ Gmail 인증이 필요합니다.\n"
+                "터미널에서 아래 명령을 먼저 실행하세요:\n"
+                "`python gmail_auth.py`"
+            )
+
     system_prompt = SUBAGENTS.get(agent)
     if not system_prompt:
         logger.warning("unknown agent '%s', returning payload", agent)
@@ -258,6 +271,40 @@ async def run_document_analyst(extracted: dict, user_question: str = "") -> str:
         parts.append(f"## 사용자 질문\n{user_question.strip()}")
 
     return await _gemini(_DOCUMENT_ANALYSIS_SYSTEM, "\n\n".join(parts))
+
+
+_GMAIL_ANALYSIS_SYSTEM = """\
+당신은 이메일 비서입니다. 제공된 Gmail 메일 목록을 한국어로 분석하여 아래 형식으로 정리하세요.
+
+각 메일마다:
+• **[번호] 제목** (발신자 | 날짜)
+  - 핵심 내용 1-3줄 요약
+  - 필요한 액션: (답장 필요 / 처리 필요 / 참고만 / 없음)
+  - 중요도: 🔴 높음 / 🟡 보통 / 🟢 낮음
+
+마지막에 전체 요약 한 줄을 추가하세요.
+"""
+
+
+async def run_gmail_analyst(messages: list[dict], user_question: str = "") -> str:
+    """Analyse Gmail messages with Gemini."""
+    if not messages:
+        return "📭 조건에 맞는 메일이 없습니다."
+
+    parts: list[str] = [f"[총 {len(messages)}개 메일]"]
+    for i, m in enumerate(messages, 1):
+        parts.append(
+            f"## 메일 {i}\n"
+            f"발신자: {m['from']}\n"
+            f"제목: {m['subject']}\n"
+            f"날짜: {m['date']}\n"
+            f"본문:\n{m['body'] or m['snippet']}"
+        )
+
+    if user_question.strip():
+        parts.append(f"## 사용자 질문\n{user_question.strip()}")
+
+    return await _gemini(_GMAIL_ANALYSIS_SYSTEM, "\n\n".join(parts))
 
 
 async def run_specialist(agent_name: str, user_message: str) -> str:

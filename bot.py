@@ -30,8 +30,8 @@ from telegram.ext import (
     filters,
 )
 
-from agents import run_document_analyst, run_orchestrator, run_specialist
-from tools import extract_document
+from agents import run_document_analyst, run_gmail_analyst, run_orchestrator, run_specialist
+from tools import extract_document, fetch_gmail_messages
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -119,6 +119,24 @@ BOT_ROLES: list[dict[str, str | None]] = [
             "예) 파일 첨부 + 캡션 '재무계획 요약해줘'"
         ),
     },
+    {
+        "env": "TELEGRAM_BOT_TOKEN_GMAIL",
+        "agent": "gmail",
+        "label": "gmail",
+        "start": (
+            "안녕하세요 {user}님! Gmail 분석 봇입니다.\n"
+            "/gmail — 읽지 않은 메일 5개 요약\n"
+            "/gmail 10 — 읽지 않은 메일 10개 요약\n"
+            "/gmail all — 최근 메일 5개 요약"
+        ),
+        "help": (
+            "Gmail 분석 전용 봇\n"
+            "• /gmail — 읽지 않은 메일 요약 (기본 5개)\n"
+            "• /gmail [숫자] — 지정 개수만큼 요약\n"
+            "• /gmail all — 읽음 여부 무관 최근 메일\n"
+            "• /gmail_auth — Gmail 재인증"
+        ),
+    },
 ]
 
 
@@ -164,6 +182,48 @@ def _make_application(token: str, role: dict[str, str | None]) -> Application:
                 reply[chunk_start : chunk_start + TELEGRAM_MAX_MESSAGE]
             )
 
+    async def gmail_command(
+        update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        args = context.args or []
+        if args and args[0] == "all":
+            query, max_results = "", 5
+        else:
+            query = "is:unread"
+            max_results = min(int(args[0]), 20) if args and args[0].isdigit() else 5
+
+        chat_id = update.effective_chat.id
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        await update.message.reply_text("📧 Gmail 확인 중입니다...")
+
+        try:
+            msgs = await fetch_gmail_messages(max_results=max_results, query=query)
+            reply = await run_gmail_analyst(msgs)
+        except FileNotFoundError:
+            reply = (
+                "⚠️ Gmail 인증이 필요합니다.\n"
+                "터미널에서 아래 명령을 먼저 실행하세요:\n"
+                "`python gmail_auth.py`"
+            )
+        except Exception:
+            logger.exception("[%s] gmail command failed", label)
+            reply = "⚠️ Gmail 조회 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+
+        for chunk_start in range(0, len(reply), TELEGRAM_MAX_MESSAGE):
+            await update.message.reply_text(
+                reply[chunk_start : chunk_start + TELEGRAM_MAX_MESSAGE]
+            )
+
+    async def gmail_auth_command(
+        update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        await update.message.reply_text(
+            "터미널에서 아래 명령을 실행하여 Gmail을 인증하세요:\n"
+            "`python gmail_auth.py`\n\n"
+            "인증 완료 후 /gmail 을 사용할 수 있습니다.",
+            parse_mode="Markdown",
+        )
+
     async def handle_document(
         update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -197,6 +257,8 @@ def _make_application(token: str, role: dict[str, str | None]) -> Application:
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("gmail", gmail_command))
+    app.add_handler(CommandHandler("gmail_auth", gmail_auth_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     return app
