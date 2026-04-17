@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+import io
 import logging
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import zipfile
 from typing import Any
+from xml.etree import ElementTree as ET
 
 import httpx
 
@@ -110,3 +118,193 @@ WEATHER_CODE_KO: dict[int, str] = {
 
 def describe_weather_code(code: int) -> str:
     return WEATHER_CODE_KO.get(code, f"날씨 코드 {code}")
+
+
+# ---------------------------------------------------------------------------
+# HWP / HWPX document extraction
+# ---------------------------------------------------------------------------
+
+_HP = "http://www.hancom.co.kr/hwpml/2012/paragraph"
+
+
+def extract_document(file_bytes: bytes, filename: str) -> dict[str, Any]:
+    """Extract text, tables, and image count from an HWP or HWPX file."""
+    fl = filename.lower()
+    if fl.endswith(".hwpx"):
+        return _extract_hwpx(file_bytes)
+    if fl.endswith(".hwp"):
+        return _extract_hwp(file_bytes)
+    raise ValueError(f"지원하지 않는 형식: {filename}")
+
+
+# ── HWPX (ZIP + XML) ────────────────────────────────────────────────────────
+
+def _extract_hwpx(file_bytes: bytes) -> dict[str, Any]:
+    paragraphs: list[str] = []
+    tables: list[list[list[str]]] = []
+    image_count = 0
+
+    with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+        names = zf.namelist()
+        image_count = sum(
+            1 for n in names
+            if re.search(r"\.(png|jpe?g|gif|bmp|tiff?|emf|wmf)$", n, re.I)
+        )
+        section_files = sorted(
+            n for n in names if re.match(r"Contents/section\d+\.xml", n)
+        )
+        if not section_files:
+            section_files = sorted(
+                n for n in names
+                if "section" in n.lower() and n.endswith(".xml")
+            )
+        for sf in section_files:
+            _parse_hwpx_section(zf.read(sf), paragraphs, tables)
+
+    return {
+        "format": "HWPX",
+        "text": "\n".join(p for p in paragraphs if p.strip()),
+        "tables": tables,
+        "image_count": image_count,
+    }
+
+
+def _parse_hwpx_section(
+    xml_bytes: bytes,
+    paragraphs: list[str],
+    tables: list[list[list[str]]],
+) -> None:
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return
+
+    T = f"{{{_HP}}}t"
+    P = f"{{{_HP}}}p"
+    TBL = f"{{{_HP}}}tbl"
+    TR = f"{{{_HP}}}tr"
+    TC = f"{{{_HP}}}tc"
+
+    def para_text(p_elem: ET.Element) -> str:
+        return "".join(t.text or "" for t in p_elem.iter(T))
+
+    def parse_table(tbl_elem: ET.Element) -> list[list[str]]:
+        rows = []
+        for tr in tbl_elem.iter(TR):
+            row = []
+            for tc in tr.findall(TC):
+                cell = " ".join(
+                    para_text(p).strip()
+                    for p in tc.iter(P)
+                    if para_text(p).strip()
+                )
+                row.append(cell)
+            if row:
+                rows.append(row)
+        return rows
+
+    def walk(elem: ET.Element) -> None:
+        for child in elem:
+            if child.tag == TBL:
+                tbl = parse_table(child)
+                if tbl:
+                    tables.append(tbl)
+                    paragraphs.append(f"[표 {len(tables)}]")
+            elif child.tag == P:
+                paragraphs.append(para_text(child))
+            else:
+                walk(child)
+
+    walk(root)
+
+
+# ── HWP binary ──────────────────────────────────────────────────────────────
+
+def _extract_hwp(file_bytes: bytes) -> dict[str, Any]:
+    result = _try_hwp5txt(file_bytes)
+    if result is not None:
+        return result
+    result = _try_libreoffice(file_bytes, ".hwp")
+    if result is not None:
+        return result
+    return {
+        "format": "HWP",
+        "text": (
+            "(HWP 바이너리 파싱 실패)\n"
+            "pyhwp 또는 LibreOffice가 설치되어 있지 않습니다.\n"
+            "pip install pyhwp  또는  sudo apt-get install libreoffice"
+        ),
+        "tables": [],
+        "image_count": 0,
+    }
+
+
+def _try_hwp5txt(file_bytes: bytes) -> dict[str, Any] | None:
+    if not shutil.which("hwp5txt"):
+        return None
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".hwp", delete=False) as f:
+            f.write(file_bytes)
+            tmp = f.name
+        proc = subprocess.run(
+            ["hwp5txt", tmp],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return {
+                "format": "HWP (pyhwp)",
+                "text": proc.stdout.strip(),
+                "tables": [],
+                "image_count": 0,
+            }
+    except Exception:
+        logger.exception("hwp5txt failed")
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.unlink(tmp)
+    return None
+
+
+def _try_libreoffice(file_bytes: bytes, suffix: str) -> dict[str, Any] | None:
+    lo = shutil.which("libreoffice") or shutil.which("soffice")
+    if not lo:
+        return None
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = os.path.join(tmpdir, f"input{suffix}")
+            with open(src, "wb") as f:
+                f.write(file_bytes)
+            subprocess.run(
+                [lo, "--headless", "--convert-to", "docx", "--outdir", tmpdir, src],
+                capture_output=True,
+                timeout=60,
+            )
+            docx_path = os.path.join(tmpdir, "input.docx")
+            if os.path.exists(docx_path):
+                with open(docx_path, "rb") as f:
+                    return _extract_docx(f.read())
+    except Exception:
+        logger.exception("libreoffice conversion failed")
+    return None
+
+
+def _extract_docx(docx_bytes: bytes) -> dict[str, Any]:
+    from docx import Document  # python-docx (optional dep)
+
+    doc = Document(io.BytesIO(docx_bytes))
+    paras = [p.text for p in doc.paragraphs if p.text.strip()]
+    tables = []
+    for tbl in doc.tables:
+        tables.append([[cell.text.strip() for cell in row.cells] for row in tbl.rows])
+    image_count = sum(
+        1 for rel in doc.part.rels.values() if "image" in rel.reltype
+    )
+    return {
+        "format": "HWP→DOCX (LibreOffice)",
+        "text": "\n".join(paras),
+        "tables": tables,
+        "image_count": image_count,
+    }

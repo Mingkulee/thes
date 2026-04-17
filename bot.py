@@ -30,7 +30,8 @@ from telegram.ext import (
     filters,
 )
 
-from agents import run_orchestrator, run_specialist
+from agents import run_document_analyst, run_orchestrator, run_specialist
+from tools import extract_document
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -102,6 +103,22 @@ BOT_ROLES: list[dict[str, str | None]] = [
             "현재 날씨와 3일 예보를 알려드립니다."
         ),
     },
+    {
+        "env": "TELEGRAM_BOT_TOKEN_DOCANALYST",
+        "agent": "document",
+        "label": "docanalyst",
+        "start": (
+            "안녕하세요 {user}님! 문서 분석 전문 봇입니다.\n"
+            "HWP 또는 HWPX 파일을 보내주시면 텍스트·표를 분석합니다.\n"
+            "파일 전송 시 캡션에 질문을 적으면 집중 분석합니다."
+        ),
+        "help": (
+            "문서 분석 전용 봇\n"
+            "• HWP / HWPX 파일 첨부 → 자동 분석\n"
+            "• 파일 + 캡션(질문) → 질문 기반 분석\n"
+            "예) 파일 첨부 + 캡션 '재무계획 요약해줘'"
+        ),
+    },
 ]
 
 
@@ -147,10 +164,41 @@ def _make_application(token: str, role: dict[str, str | None]) -> Application:
                 reply[chunk_start : chunk_start + TELEGRAM_MAX_MESSAGE]
             )
 
+    async def handle_document(
+        update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        doc = update.message.document
+        if not doc:
+            return
+        fname = doc.file_name or ""
+        if not (fname.lower().endswith(".hwp") or fname.lower().endswith(".hwpx")):
+            await update.message.reply_text("📄 HWP 또는 HWPX 파일만 분석할 수 있습니다.")
+            return
+
+        chat_id = update.effective_chat.id
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        await update.message.reply_text(f"📄 `{fname}` 분석 중입니다...", parse_mode="Markdown")
+
+        try:
+            tg_file = await context.bot.get_file(doc.file_id)
+            file_bytes = bytes(await tg_file.download_as_bytearray())
+            extracted = await asyncio.to_thread(extract_document, file_bytes, fname)
+            user_question = update.message.caption or ""
+            reply = await run_document_analyst(extracted, user_question)
+        except Exception:
+            logger.exception("[%s] document analysis failed", label)
+            reply = "⚠️ 문서 분석 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+
+        for chunk_start in range(0, len(reply), TELEGRAM_MAX_MESSAGE):
+            await update.message.reply_text(
+                reply[chunk_start : chunk_start + TELEGRAM_MAX_MESSAGE]
+            )
+
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     return app
 
 

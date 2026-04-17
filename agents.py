@@ -217,6 +217,49 @@ async def run_orchestrator(user_message: str) -> str:
     return await _gemini(system_prompt, payload)
 
 
+_DOCUMENT_ANALYSIS_SYSTEM = """\
+당신은 한국 사업계획서 전문 분석가입니다.
+아래 문서 내용을 분석하여 다음을 마크다운 형식으로 체계적으로 정리하세요:
+
+1. **문서 개요** — 제목 추정, 전체 구조 요약
+2. **핵심 사업 내용** — 목적, 비전, 전략, 타겟 시장
+3. **표 데이터 요약** — 각 표의 의미 해석
+4. **주요 수치·일정** — 예산, 매출 목표, KPI, 일정
+5. **특이사항** — 이미지/도표 개수, 주목할 내용
+
+사용자 질문이 있으면 마지막에 **[질문 답변]** 섹션으로 별도 답변하세요.
+항상 한국어로 답변하세요.
+"""
+
+
+async def run_document_analyst(extracted: dict, user_question: str = "") -> str:
+    """Analyse extracted HWP/HWPX content with Gemini."""
+    parts: list[str] = [f"[문서 형식: {extracted.get('format', '알 수 없음')}]"]
+
+    text = (extracted.get("text") or "").strip()
+    if text:
+        if len(text) > 15_000:
+            text = text[:15_000] + "\n...(이하 생략)"
+        parts.append(f"## 본문\n{text}")
+    else:
+        parts.append("## 본문\n(추출된 텍스트 없음)")
+
+    for i, tbl in enumerate(extracted.get("tables") or [], 1):
+        lines = [f"## 표 {i}"]
+        for row in tbl:
+            lines.append(" | ".join(str(c) for c in row))
+        parts.append("\n".join(lines))
+
+    image_count = extracted.get("image_count", 0)
+    if image_count:
+        parts.append(f"## 이미지/그림: {image_count}개 포함 (텍스트 분석만 가능)")
+
+    if user_question.strip():
+        parts.append(f"## 사용자 질문\n{user_question.strip()}")
+
+    return await _gemini(_DOCUMENT_ANALYSIS_SYSTEM, "\n\n".join(parts))
+
+
 async def run_specialist(agent_name: str, user_message: str) -> str:
     """Run a single specialist sub-agent directly, bypassing the orchestrator."""
     if agent_name == "weather":
